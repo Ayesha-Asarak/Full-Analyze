@@ -21,6 +21,7 @@ import asyncio
 import json
 from bson.objectid import ObjectId
 from bson import ObjectId
+import logging
 # Initialize FastAPI app
 app = FastAPI()
 
@@ -69,17 +70,134 @@ async def fetch_all_data():
         doc['_id'] = str(doc['_id'])  # Convert ObjectId to string
     return {"data": jsonable_encoder(documents)}
 
+
 @app.get("/fetch_user_messages")
 async def fetch_user_messages():
-    documents = list(collection.find())  # Fetch all documents from the collection
+    documents = list(collection.find({"status": "Unread"}))
     
+    if not documents:
+        raise HTTPException(status_code=404, detail="No unread messages found")
+
     user_messages = []
     for doc in documents:
         if 'messages' in doc:
-            # Filter user messages from the messages array
             user_messages.extend([msg for msg in doc['messages'] if msg.get('sender') == 'user'])
+    
 
-    return {"user_messages": jsonable_encoder(user_messages)}
+    
+    for doc in documents:
+        doc['_id'] = str(doc['_id'])
+
+    return {"user_messages": jsonable_encoder(user_messages), "documents": documents}
+
+
+def check_message_against_clusters(message, representative_questions, threshold=0.75):
+ 
+    message_embedding = encode_text_sbert(message)
+    for message in representative_questions:
+        rep_question_embedding = encode_text_sbert(message)
+        similarity = cosine_similarity([message_embedding], [rep_question_embedding])[0][0]
+        if similarity >= threshold :
+            return True
+    return False
+
+# Filter out unwanted messages like greetings and thank-yous
+def filter_unwanted_messages(messages):
+    unwanted_phrases = [
+        "hello", "hi", "hey", "greetings", "good morning", "good afternoon",
+        "good evening", "thank you", "thanks", "bye", "goodbye"
+    ]
+    
+    # Filter messages directly without assuming nested structure
+    filtered_messages = [
+        message for message in messages
+        if isinstance(message, dict) and 'message' in message and not any(phrase in message['message'].lower() for phrase in unwanted_phrases)
+    ]
+    
+    return filtered_messages
+
+def convert_objectid_to_str(doc):
+    if isinstance(doc, list):
+        return [convert_objectid_to_str(item) for item in doc]
+    elif isinstance(doc, dict):
+        return {k: (str(v) if isinstance(v, ObjectId) else convert_objectid_to_str(v)) for k, v in doc.items()}
+    return doc
+async def periodic_cluster_update():
+    while True:
+        # Background task to run update_or_create_clusters
+        await update_or_create_clusters()
+
+        # Adjust sleep time as needed (e.g., every 10 seconds)
+        await asyncio.sleep(10)
+
+# Start the periodic task when the application starts
+@app.on_event("startup")
+async def startup_event():
+    asyncio.create_task(periodic_cluster_update())
+@app.post("/update_or_create_clusters")
+async def update_or_create_clusters():
+    new_messages = await fetch_user_messages()
+    
+    documents = list(collection.find({"status": "Unread"}))
+    
+    # Extract user messages and their parent document IDs from all documents
+    user_messages = []
+    document_id_map = {}  # To map message to its parent document ID
+    
+    for document in documents:
+        doc_id = document['_id']
+        messages = document.get('messages', [])
+        for msg in messages:
+            if msg.get('sender') == 'user':
+                user_messages.append(msg)
+                document_id_map[msg['message']] = doc_id
+    
+    # Filter out unwanted messages
+    filtered_messages = filter_unwanted_messages(user_messages)
+    existing_clusters_docs = list(group_collections.find({"status": "Unread"}))
+    
+        # Create a list of filtered messages in the desired format
+    existing_clusters_docs = [message['messages'] for message in existing_clusters_docs]
+    if(len(existing_clusters_docs)==0 ):
+        new_cluster = {
+                "created_date": datetime.utcnow().isoformat(),
+                "status": "Unread",
+                "messages": filtered_messages[0]["message"]  # Ensure messages are in a list
+            }
+        insert_result = group_collections.insert_one(new_cluster)
+        filtered_messages=filtered_messages[1:]
+    # Print the filtered user messages
+    # for message in filtered_messages:
+    #     print(message['message'])
+    
+    # Logic for updating or creating clusters
+    updated_clusters = []
+    for message in filtered_messages:
+        # Check if the message matches an existing cluster
+        cluster_id = check_message_against_clusters(message["message"], existing_clusters_docs)
+        
+        if cluster_id:
+            continue  # If matching cluster found, skip creating a new one
+        else:
+            new_cluster = {
+                "created_date": datetime.utcnow().isoformat(),
+                "status": "Unread",
+                "messages": message["message"]  # Ensure messages are in a list
+            }
+            insert_result = group_collections.insert_one(new_cluster)
+            updated_clusters.append(insert_result.inserted_id)
+        existing_clusters_docs = list(group_collections.find({"status": "Unread"}))
+    
+        # Create a list of filtered messages in the desired format
+        existing_clusters_docs = [message['messages'] for message in existing_clusters_docs]
+    # Example code to update documents status to "Read"
+    for message in filtered_messages:
+        doc_id = document_id_map.get(message["message"])
+        if doc_id:
+            collection.update_one({"_id":convert_objectid_to_str(doc_id)}, {"$set": {"status": "read"}})
+    
+    return {"updated_clusters": updated_clusters}
+
 # Load SBERT model for sentence embeddings
 sbert_model = SentenceTransformer('all-mpnet-base-v2')
 # Function to encode text using SBERT model
@@ -99,109 +217,69 @@ from sklearn.metrics.pairwise import cosine_similarity
 def encode_text_sbert(text):
     return sbert_model.encode([text])[0]
 
-# Filter out unwanted messages like greetings and thank-yous
-def filter_unwanted_messages(messages):
-    unwanted_phrases = [
-        "hello", "hi", "hey", "greetings", "good morning", "good afternoon",
-        "good evening", "thank you", "thanks", "bye", "goodbye"
-    ]
-    filtered_messages = [
-        message for message in messages
-        if not any(phrase in message['message'].lower() for phrase in unwanted_phrases)
-    ]
-    return filtered_messages
 
-# Function to cluster messages using SBERT embeddings and cosine similarity
-def cluster_messages_sbert(messages, existing_clusters=None, threshold=0.75):
-    clusters = existing_clusters if existing_clusters else []
-    remaining_messages = messages.copy()
-    
-    current_date = datetime.utcnow().isoformat()
-    status = "Unread"
+logger = logging.getLogger(__name__)
 
-    while remaining_messages:
-        seed_message = remaining_messages.pop(0)['message']
-        seed_embedding = encode_text_sbert(seed_message)
 
-        # Find the most suitable cluster or create a new one
-        cluster_found = False
-        for cluster in clusters:
-            centroid = np.mean([encode_text_sbert(msg['message']) for msg in cluster['messages']], axis=0)
-            similarity = cosine_similarity([seed_embedding], [centroid])[0][0]
-            if similarity >= threshold:
-                cluster['messages'].append({"_id": str(len(cluster['messages']) + 1), "message": seed_message})
-                cluster_found = True
-                break
-        
-        if not cluster_found:
-            new_cluster = {
-                "created_date": current_date,
-                "status": status,
-                "messages": [{"_id": "1", "message": seed_message}]
-            }
-            clusters.append(new_cluster)
-#
-    return clusters
+@app.post("/rephrase_messages")
+async def rephrase_messages():
+    try:
+        documents = list(collection.find({"status": "Unread"}))  # Fetch unread documents
+
+        if not documents:
+            logger.info("No unread documents found.")
+            return {"message": "No unread documents found."}
+
+        rephrased_messages = []
+        for document in documents:
+            doc_id = document['_id']
+            messages = document.get('messages', '')  # Assuming messages are stored as strings
+
+            if isinstance(messages, str):
+                # Handle the case where messages is a single string
+                original_message = messages
+                rephrased_message = rephrase_message(original_message, model_gemini_pro)
+
+                # Update the message in the database
+                collection.update_one(
+                    {"_id": ObjectId(doc_id)},
+                    {"$set": {"messages": rephrased_message}}
+                )
+
+                rephrased_messages.append({
+                    "document_id": str(doc_id),
+                    "original_message": original_message,
+                    "rephrased_message": rephrased_message
+                })
+
+            elif isinstance(messages, list):
+                # Handle the case where messages is a list of strings
+                for original_message in messages:
+                    rephrased_message = rephrase_message(original_message, model_gemini_pro)
+
+                    # Update the message in the database
+                    collection.update_one(
+                        {"_id": ObjectId(doc_id), "messages": original_message},
+                        {"$set": {"messages.$": rephrased_message}}
+                    )
+
+                    rephrased_messages.append({
+                        "document_id": str(doc_id),
+                        "original_message": original_message,
+                        "rephrased_message": rephrased_message
+                    })
+
+        return {"rephrased_messages": rephrased_messages}
+
+    except Exception as e:
+        logger.error(f"Error in rephrase_messages: {e}")
+        return {"error": str(e)}
+
 
 # Global variable to save clusters
 saved_clusters = None
 
-# Endpoint to fetch and save clustered messages
-@app.get("/clustered-messages-sbert")
-async def get_clustered_messages_sbert():
-    global saved_clusters
-    
-    # Check if clusters are already saved globally or in database
-    if saved_clusters:
-        return {"clusters": saved_clusters}
-    
-    # Fetch all user messages from the collection
-    documents = list(collection.find())
-    user_messages = [msg for doc in documents for msg in doc.get('messages', []) if msg.get('sender') == 'user']
-    
-    if not user_messages:
-        return {"message": "No user messages found"}
-    
-    # Filter out unwanted messages
-    user_messages = filter_unwanted_messages(user_messages)
-    
-    # Load existing clusters from database
-    existing_clusters = []
-    existing_clusters_docs = list(group_collections.find())
-    for cluster_doc in existing_clusters_docs:
-        existing_clusters.append({
-            "created_date": cluster_doc.get("created_date", datetime.utcnow().isoformat()),  # Default to current date if missing
-            "status": cluster_doc.get("status", "Unread"),  # Default to "Unread" if missing
-            "messages": cluster_doc.get("messages", [])  # Default to an empty list if missing
-        })
-    
-    # Cluster user messages using SBERT embeddings and cosine similarity
-    clustered_messages = cluster_messages_sbert(user_messages, existing_clusters)
-    
-    # Save updated clusters in the database
-    group_collections.delete_many({})  # Clear existing clusters
-    for idx, cluster in enumerate(clustered_messages):
-        group_collections.insert_one({
-            "cluster_id": idx,
-            "created_date": cluster["created_date"],
-            "status": cluster["status"],
-            "messages": cluster["messages"]
-        })
-    
-    # Prepare clusters for response serialization
-    serialized_clusters = []
-    for cluster in clustered_messages:
-        serialized_cluster = {
-            "created_date": cluster["created_date"],
-            "status": cluster["status"],
-            "messages": [{"_id": msg["_id"], "message": msg["message"]} for msg in cluster["messages"]]
-        }
-        serialized_clusters.append(serialized_cluster)
-    
-    # Update saved_clusters variable
-    saved_clusters = serialized_clusters
-    
-    return {"clusters": serialized_clusters}
+
 
 
 
@@ -211,76 +289,15 @@ model = SentenceTransformer('paraphrase-MiniLM-L6-v2')
 
 
 
-
-greeting_phrases = ["hi", "hello", "hey", "good morning", "good afternoon", "good evening"]
-thank_you_phrases = ["thank you", "thanks", "thank you so much", "thanks a lot"]
-
-def is_greeting_or_thank_you(message):
-    message_lower = message.lower()
-    for phrase in greeting_phrases + thank_you_phrases:
-        if phrase in message_lower:
-            return True
-    return False
-
-def get_representative_question(cluster):
-    if not cluster:
-        return None
-    messages = [msg['message'] for msg in cluster]
-    embeddings = model.encode(messages)
-    
-    # Compute pairwise cosine similarity
-    cosine_matrix = util.pytorch_cos_sim(embeddings, embeddings).numpy()
-    
-    # Sum of similarities for each message
-    similarity_sum = np.sum(cosine_matrix, axis=1)
-    
-    # Index of the message with the highest sum of similarities
-    representative_idx = np.argmax(similarity_sum)
-    
-    return cluster[representative_idx]['message']
-
-
 # Function to rephrase a question using the generative AI model
-def rephrase_question(question, model_gemini_pro):
+def rephrase_message(question, model_gemini_pro):
     prompt = f"Rephrase the following question as instruction to admin from system to check and solve the user's problem in one sentence more accurately: {question}"
     response = model_gemini_pro.generate_content(prompt)
     return response.text.strip()
 
-@app.get("/rephrased-representative-questions")
-async def get_rephrased_representative_questions():
-    # Fetch all clusters from the group_collections collection
-    clusters_cursor = group_collections.find()
-    clusters = list(clusters_cursor)
-    
-    if not clusters:
-        raise HTTPException(status_code=404, detail="No clusters found in the group_collections collection.")
-    
-    representative_questions = []
-    rephrased_questions = []
-    for cluster_document in clusters:
-        cluster = cluster_document.get("messages", [])
-        # Skip clusters that are primarily greetings or thank you messages
-        if all(is_greeting_or_thank_you(msg['message']) for msg in cluster):
-            continue
-        rep_question = get_representative_question(cluster)
-        if rep_question:
-            representative_questions.append(rep_question)
-            rephrased_question = rephrase_question(rep_question, model_gemini_pro)
-            rephrased_questions.append(rephrased_question)
-    
-    return {"rephrased_representative_questions": rephrased_questions}
-class RepresentativeQuestionsResponse(BaseModel):
-    representative_questions: List[str]
 
+sent_notifications = set()  # Set to track sent notifications
 
-
-
-
-
-
-
-# Set to track sent notifications
-sent_notifications = set()
 
 
 @app.websocket("/notifications")
@@ -288,59 +305,33 @@ async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
 
     while True:
-        # Fetch all clusters from the database
-        clusters_cursor = group_collections.find()
-        clusters = list(clusters_cursor)
+        # Fetch all clusters with status "Unread" from the database
+        unread_clusters = list(group_collections.find({"status": "Unread"}))
 
-        if not clusters:
-            await websocket.send_json({"message": "No clusters found"})
+        if not unread_clusters:
+            await websocket.send_json({"message": "No unread clusters found"})
             continue
 
-        rephrased_questions = []
-        cluster_ids = []
-
-        for cluster_document in clusters:
+        for cluster_document in unread_clusters:
             cluster_id = str(cluster_document["_id"])
+            messages = cluster_document.get("messages", [])
 
-            # Check if notification for this cluster has already been sent or cluster is marked as read
-            if cluster_id in sent_notifications:
-                continue
-            
-            cluster_status = cluster_document.get("status", "")
-            if cluster_status == "Read":
-                sent_notifications.add(cluster_id)  # Add to set even if it's read to prevent future notifications
-                continue
+            # If messages is a string, convert it to a list
+            if isinstance(messages, str):
+                messages = [{"message": messages}]
 
-            cluster = cluster_document.get("messages", [])
-            if all(is_greeting_or_thank_you(msg['message']) for msg in cluster):
-                continue
-            
-            rep_question = get_representative_question(cluster)
-            
-            if rep_question:
-                rephrased_question = rephrase_question(rep_question, model_gemini_pro)
-                rephrased_questions.append(rephrased_question)
-                cluster_ids.append(cluster_id)
-            else:
-                # Create a new cluster with unread status
-                new_cluster = {
-                    "messages": cluster,
-                    "status": "Unread"
-                }
-                insert_result = group_collections.insert_one(new_cluster)
-                cluster_ids.append(str(insert_result.inserted_id))  # Save the new cluster ID
+            rephrased_messages = []
+            for message in messages:
+                rephrased_message = rephrase_message(message["message"], model_gemini_pro)
+                rephrased_messages.append(rephrased_message)
 
-        if not rephrased_questions:
-            await websocket.send_json({"message": "No new notifications found"})
-        else:
-            for rephrased_question, cluster_id in zip(rephrased_questions, cluster_ids):
+            # Send rephrased messages as notifications
+            for message in rephrased_messages:
                 notification = {
-                    "question": rephrased_question,
-                    "buttons": ["Done", "Ignore"],
+                    "question": message,  # Ensure the 'question' field is included
                     "cluster_id": cluster_id
                 }
                 await websocket.send_json(notification)
-                sent_notifications.add(cluster_id)
 
         data = await websocket.receive_json()
         action = data.get("action")
@@ -348,7 +339,7 @@ async def websocket_endpoint(websocket: WebSocket):
 
         if action in ["Done", "Ignore"] and cluster_id:
             update_query = {"_id": ObjectId(cluster_id)}
-            update_fields = {"$set": {"status": "Read"}} 
+            update_fields = {"$set": {"status": "read"}}
             update_result = group_collections.update_one(update_query, update_fields)
 
             if update_result.modified_count == 1:
