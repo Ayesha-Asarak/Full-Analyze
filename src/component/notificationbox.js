@@ -6,10 +6,11 @@ import HighlightOffIcon from '@mui/icons-material/HighlightOff';
 import { Button, Box, Typography, Badge } from '@mui/material';
 import { ThemeProvider, createTheme } from '@mui/material/styles';
 import PropTypes from 'prop-types';
+import axios from 'axios';
 
-const NotificationBox = ({ notifications, newNotificationCount, handleButtonClick }) => {
+const NotificationBox = ({ initialNotifications = [], newNotificationCount, handleButtonClick }) => {
     const [showNewMessages, setShowNewMessages] = useState(true);
-    const [newNotifications, setNewNotifications] = useState(notifications);
+    const [newNotifications, setNewNotifications] = useState(initialNotifications);
     const [oldNotifications, setOldNotifications] = useState([]);
 
     const outerTheme = createTheme({
@@ -47,12 +48,27 @@ const NotificationBox = ({ notifications, newNotificationCount, handleButtonClic
             console.error('Cluster ID is undefined for notification:', notification);
             // Handle this case as needed, e.g., show an error message
         }
-        
     };
 
     const renderNotifications = showNewMessages ? newNotifications : oldNotifications;
 
     useEffect(() => {
+        // Fetch all notifications from the backend on mount
+        const fetchNotifications = async () => {
+            try {
+                const response = await axios.get('/notifications');
+                const allNotifications = response.data.notifications;
+                const newNotifs = allNotifications.filter(notification => notification.action === 'Unread');
+                const oldNotifs = allNotifications.filter(notification => notification.action !== 'Unread');
+                setNewNotifications(newNotifs);
+                setOldNotifications(oldNotifs);
+            } catch (error) {
+                console.error('Failed to fetch notifications:', error);
+            }
+        };
+
+        fetchNotifications();
+
         const websocket = new WebSocket('ws://localhost:8000/notifications');
 
         websocket.onmessage = (event) => {
@@ -71,7 +87,11 @@ const NotificationBox = ({ notifications, newNotificationCount, handleButtonClic
                     date: new Date().toLocaleString(),
                     cluster_id,
                 };
-                setNewNotifications((prev) => [...prev, newNotification]);
+                setNewNotifications((prev) => {
+                    const updatedNotifications = [...prev, newNotification];
+                    localStorage.setItem('newNotifications', JSON.stringify(updatedNotifications));
+                    return updatedNotifications;
+                });
             } else {
                 console.error('Received invalid WebSocket data:', data);
             }
@@ -90,6 +110,12 @@ const NotificationBox = ({ notifications, newNotificationCount, handleButtonClic
         };
     }, []);
 
+    useEffect(() => {
+        // Save notifications to local storage whenever they change
+        localStorage.setItem('newNotifications', JSON.stringify(newNotifications));
+        localStorage.setItem('oldNotifications', JSON.stringify(oldNotifications));
+    }, [newNotifications, oldNotifications]);
+
     return (
         <ThemeProvider theme={outerTheme}>
             <Box sx={{
@@ -107,7 +133,7 @@ const NotificationBox = ({ notifications, newNotificationCount, handleButtonClic
                         Notifications
                     </Typography>
                     {showNewMessages && newNotificationCount > 0 && (
-                        <Badge badgeContent={newNotificationCount} color="secondary" sx={{ marginLeft: '2%' }} />
+                        <Badge badgeContent={newNotificationCount} color="secondary" sx={{ marginLeft: '2.5%' }} />
                     )}
                 </Box>
                 <Box sx={{ display: 'flex', marginBottom: '16px', marginLeft: '2%' }}>
@@ -161,9 +187,23 @@ const NotificationBox = ({ notifications, newNotificationCount, handleButtonClic
                                     </Typography>
                                 </Box>
                                 {!notification.action && (
-                                    <Box sx={{ display: 'flex', justifyContent: 'space-between', marginTop: '8px' }}>
-                                        <Button variant="contained" color="primary" sx={{ width: '13%' }} onClick={() => handleNotificationAction('Done', index)}>Done</Button>
-                                        <Button variant="outlined" color="primary" sx={{ width: '13%' }} onClick={() => handleNotificationAction('Ignore',index)}>Ignore</Button>
+                                    <Box sx={{ display: 'flex', justifyContent: 'flex-end', marginTop: '8px' }}>
+                                        <Button
+                                            variant="contained"
+                                            color="primary"
+                                            sx={{ marginRight: '8px', width: '13%' }}
+                                            onClick={() => handleNotificationAction('Done', index)}
+                                        >
+                                            Done
+                                        </Button>
+                                        <Button
+                                            variant="outlined"
+                                            color="secondary"
+                                            sx={{ marginRight: '8px', width: '9%' }}
+                                            onClick={() => handleNotificationAction('Ignore', index)}
+                                        >
+                                            Ignore
+                                        </Button>
                                     </Box>
                                 )}
                             </Box>
@@ -176,11 +216,12 @@ const NotificationBox = ({ notifications, newNotificationCount, handleButtonClic
 };
 
 NotificationBox.propTypes = {
-    notifications: PropTypes.arrayOf(
+    initialNotifications: PropTypes.arrayOf(
         PropTypes.shape({
             question: PropTypes.string.isRequired,
-            cluster_id: PropTypes.string.isRequired, 
-            read: PropTypes.bool.isRequired,// Ensure cluster_id is included
+            date: PropTypes.string.isRequired,
+            action: PropTypes.oneOf(['Done', 'Ignore']),
+            cluster_id: PropTypes.string.isRequired,
         })
     ).isRequired,
     newNotificationCount: PropTypes.number.isRequired,
