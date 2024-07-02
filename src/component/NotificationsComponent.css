@@ -1,0 +1,96 @@
+.notifications-container {
+    margin-top: 20px;
+    border: 1px solid #ccc;
+    padding: 10px;
+    width: 100%;
+}
+
+.notifications-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 10px;
+}
+
+.notification-count {
+    background-color: red;
+    color: white;
+    padding: 4px 8px;
+    border-radius: 50%;
+    font-size: 0.8rem;
+    margin-left: 5px;
+    animation: blink 1s infinite alternate; /* Blink animation */
+}
+
+@keyframes blink {
+    from {
+        opacity: 1;
+    }
+    to {
+        opacity: 0;
+    }
+}
+.notifications-container {
+    display: flex;
+    flex-direction: column;
+    margin: 20px;
+}
+/* 
+.notifications-section {
+    background: #f8f8f8;
+    padding: 20px;
+    margin-bottom: 20px;
+    border-radius: 8px;
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+}
+
+.notifications-section h2 {
+    margin-bottom: 10px;
+} */
+
+/* .buttons {
+    display: flex;
+    justify-content: space-between;
+    margin-bottom: 10px;
+}
+
+.buttons button {
+    background-color: #1976d2;
+    color: white;
+    border: none;
+    padding: 10px 20px;
+    border-radius: 4px;
+    cursor: pointer;
+}
+
+.buttons button:hover {
+    background-color: #1565c0;
+}
+.notification-item {
+    background: #e0f7fa;
+    padding: 10px;
+    margin-bottom: 10px;
+    border-radius: 4px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.notification-item p {
+    margin: 0;
+    flex-grow: 1;
+}
+
+.notification-item button {
+    margin-left: 10px;
+    background-color: #1976d2;
+    color: white;
+    border: none;
+    padding: 5px 10px;
+    border-radius: 4px;
+    cursor: pointer;
+}
+
+.notification-item button:hover {
+    background-color: #1565c0;
+} */
