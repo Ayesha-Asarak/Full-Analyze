@@ -1,4 +1,3 @@
-
 import React, { useState, useEffect } from 'react';
 import NotificationsOutlinedIcon from '@mui/icons-material/NotificationsOutlined';
 import CheckCircleOutlineIcon from '@mui/icons-material/CheckCircleOutline';
@@ -8,7 +7,7 @@ import { ThemeProvider, createTheme } from '@mui/material/styles';
 import PropTypes from 'prop-types';
 import axios from 'axios';
 
-const NotificationBox = ({ initialNotifications = [], newNotificationCount, handleButtonClick }) => {
+const NotificationBox = ({ newNotificationCount,initialNotifications = [],  handleButtonClick }) => {
     const [showNewMessages, setShowNewMessages] = useState(true);
     const [newNotifications, setNewNotifications] = useState(initialNotifications);
     const [oldNotifications, setOldNotifications] = useState([]);
@@ -132,8 +131,8 @@ const NotificationBox = ({ initialNotifications = [], newNotificationCount, hand
                     <Typography variant="h6" component="h2" sx={{ marginLeft: '8px' }}>
                         Notifications
                     </Typography>
-                    {showNewMessages && newNotificationCount > 0 && (
-                        <Badge badgeContent={newNotificationCount} color="secondary" sx={{ marginLeft: '2.5%' }} />
+                    {showNewMessages && newNotifications.length > 0 && (
+                        <Badge badgeContent={newNotifications.length} color="secondary" sx={{ marginLeft: '2.5%' }} />
                     )}
                 </Box>
                 <Box sx={{ display: 'flex', marginBottom: '16px', marginLeft: '2%' }}>
